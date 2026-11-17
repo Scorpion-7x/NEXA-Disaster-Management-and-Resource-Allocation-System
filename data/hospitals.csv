@@ -1,0 +1,16 @@
+id,name,lat,lon,total_beds,free_beds
+1,City General Hospital,28.58616,77.39498,254,2
+2,Sector 62 Medical Hospital,28.58246,77.34938,259,43
+3,Fortis-type Care Hospital,28.51425,77.41507,303,69
+4,Metro Heart Hospital,28.5775,77.36367,381,42
+5,Noida District Hospital,28.509,77.35996,138,0
+6,Apex Trauma Hospital,28.54006,77.40525,116,10
+7,Sunrise Clinic Hospital,28.58684,77.39176,293,61
+8,Lifeline Hospital,28.55081,77.30562,162,40
+9,Greenfield Hospital,28.51813,77.42778,187,20
+10,Central Burn Unit Hospital,28.50267,77.33138,284,65
+11,Riverside Hospital,28.54154,77.39453,90,17
+12,Northgate Hospital,28.60387,77.38084,55,1
+13,Eastside Maternity Hospital,28.52337,77.44585,287,26
+14,Unity Hospital,28.59091,77.32562,208,5
+15,Prime Emergency Hospital,28.58514,77.40677,398,75

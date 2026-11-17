@@ -1,0 +1,51 @@
+id,type,severity,lat,lon,reported_at,status,description
+1,FLOOD,2,28.54792,77.4427,1005,OPEN,River overflow near colony
+2,MEDICAL,8,28.58217,77.40958,1018,OPEN,Mass food poisoning
+3,FLOOD,2,28.59213,77.31661,1027,OPEN,Waterlogging on main road
+4,COLLAPSE,7,28.57354,77.34713,1024,OPEN,Bridge slab collapse
+5,EARTHQUAKE,9,28.62077,77.44995,1015,OPEN,Wall collapse after tremor
+6,FLOOD,8,28.58362,77.34382,1024,OPEN,River overflow near colony
+7,FLOOD,8,28.62717,77.35533,1056,OPEN,Waterlogging on main road
+8,ACCIDENT,2,28.63365,77.38317,1064,OPEN,Bus overturned
+9,ACCIDENT,7,28.63751,77.3388,1081,OPEN,Highway multi-vehicle collision
+10,MEDICAL,1,28.53368,77.31935,1030,OPEN,Cardiac emergency at stadium
+11,ACCIDENT,2,28.52136,77.43265,1099,OPEN,Bus overturned
+12,COLLAPSE,9,28.63942,77.44808,1072,OPEN,Bridge slab collapse
+13,COLLAPSE,9,28.64973,77.38222,1117,OPEN,Bridge slab collapse
+14,ACCIDENT,1,28.53038,77.42478,1028,OPEN,Highway multi-vehicle collision
+15,COLLAPSE,9,28.63231,77.4441,1135,OPEN,Bridge slab collapse
+16,FIRE,9,28.53902,77.37284,1144,OPEN,Residential building fire
+17,MEDICAL,5,28.59958,77.30504,1119,OPEN,Cardiac emergency at stadium
+18,FLOOD,9,28.56577,77.40748,1108,OPEN,River overflow near colony
+19,FIRE,8,28.64509,77.42637,1057,OPEN,Market stall fire
+20,EARTHQUAKE,4,28.63549,77.35552,1160,OPEN,Tremor damage reported
+21,ACCIDENT,8,28.63747,77.31383,1063,OPEN,Highway multi-vehicle collision
+22,FIRE,9,28.51812,77.3067,1132,OPEN,Market stall fire
+23,COLLAPSE,10,28.55359,77.30077,1207,OPEN,Under-construction building collapse
+24,MEDICAL,10,28.53344,77.38819,1144,OPEN,Mass food poisoning
+25,ACCIDENT,10,28.60028,77.44026,1150,OPEN,Bus overturned
+26,ACCIDENT,4,28.6212,77.378,1208,OPEN,Highway multi-vehicle collision
+27,FLOOD,6,28.5584,77.31101,1189,OPEN,Waterlogging on main road
+28,FLOOD,5,28.57656,77.34916,1252,OPEN,River overflow near colony
+29,FLOOD,10,28.57464,77.36999,1116,OPEN,Waterlogging on main road
+30,MEDICAL,6,28.57794,77.36504,1270,OPEN,Mass food poisoning
+31,COLLAPSE,1,28.60663,77.3821,1155,OPEN,Under-construction building collapse
+32,FLOOD,1,28.59723,77.43964,1288,OPEN,Waterlogging on main road
+33,ACCIDENT,3,28.60664,77.43167,1165,OPEN,Highway multi-vehicle collision
+34,FIRE,5,28.59918,77.3279,1272,OPEN,Market stall fire
+35,ACCIDENT,3,28.63021,77.35748,1245,OPEN,Highway multi-vehicle collision
+36,EARTHQUAKE,7,28.56959,77.44989,1216,OPEN,Wall collapse after tremor
+37,FIRE,2,28.54887,77.37231,1222,OPEN,Warehouse fire
+38,FIRE,8,28.5347,77.44305,1266,OPEN,Residential building fire
+39,MEDICAL,3,28.6175,77.42742,1078,OPEN,Cardiac emergency at stadium
+40,FIRE,9,28.55276,77.40307,1200,OPEN,Warehouse fire
+41,MEDICAL,10,28.6074,77.38337,1205,OPEN,Cardiac emergency at stadium
+42,MEDICAL,2,28.54022,77.38336,1252,OPEN,Mass food poisoning
+43,ACCIDENT,6,28.52569,77.40268,1172,OPEN,Highway multi-vehicle collision
+44,MEDICAL,2,28.54703,77.38822,1264,OPEN,Cardiac emergency at stadium
+45,FIRE,7,28.53913,77.30943,1270,OPEN,Residential building fire
+46,FLOOD,5,28.5086,77.33528,1138,OPEN,Waterlogging on main road
+47,COLLAPSE,6,28.58418,77.44821,1329,OPEN,Bridge slab collapse
+48,MEDICAL,1,28.59386,77.40713,1384,OPEN,Cardiac emergency at stadium
+49,MEDICAL,2,28.53235,77.3694,1343,OPEN,Cardiac emergency at stadium
+50,ACCIDENT,1,28.54378,77.42252,1400,OPEN,Highway multi-vehicle collision
