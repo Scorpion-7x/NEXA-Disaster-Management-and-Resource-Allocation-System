@@ -9,11 +9,12 @@ endif()
 
 include_directories(include)
 
-file(GLOB_RECURSE SRC src/*.cpp)
+# CONFIGURE_DEPENDS: new .cpp files are picked up on the next build without re-running cmake -S
+file(GLOB_RECURSE SRC CONFIGURE_DEPENDS src/*.cpp)
 add_executable(nexa ${SRC})
 
 enable_testing()
-file(GLOB TESTS tests/test_*.cpp)
+file(GLOB TESTS CONFIGURE_DEPENDS tests/test_*.cpp)
 foreach(t ${TESTS})
   get_filename_component(name ${t} NAME_WE)
   add_executable(${name} ${t})

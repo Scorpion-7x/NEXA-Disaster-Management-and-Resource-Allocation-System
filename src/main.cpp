@@ -1,6 +1,9 @@
 #include <iostream>
 #include <string>
 #include "nexa/ds/priority_queue.h"
+#include "nexa/ds/probing_hash_table.h"
+#include "nexa/algo/sort.h"
+#include "nexa/algo/search.h"
 #include "nexa/io/logger.h"
 #include "nexa/io/store.h"
 
@@ -32,5 +35,31 @@ int main(int argc, char** argv) {
         Incident x = pq.pop();
         std::cout << "  #" << x.id << "  sev " << x.severity << "  " << x.type << "  - " << x.description << "\n";
     }
+
+    // Tier-1 demo: hashing, sorting, searching
+    ProbingHashTable<std::string, int> byName;          // resource name -> index
+    for (int i = 0; i < resources.size(); i++) byName.put(resources[i].name, i);
+    const char* lookFor = "Rescue Team 1";
+    if (int* idx = byName.get(lookFor))
+        std::cout << "\nLookup '" << lookFor << "': " << resources[*idx].type << ", " << resources[*idx].status << "\n";
+
+    DynamicArray<Incident> bySeverity = incidents;
+    countingSort(bySeverity, [](const Incident& x) { return x.severity; }, 1, 10, true);
+    std::cout << "Counting sort by severity: first sev " << bySeverity[0].severity
+              << ", last sev " << bySeverity.back().severity << "\n";
+
+    DynamicArray<Incident> byTime = incidents;
+    mergeSort(byTime, [](const Incident& a, const Incident& b) { return a.reportedAt < b.reportedAt; });
+    long long from = 1000, to = 1100;
+    int first = 0;
+    int n = rangeSearch(byTime, [](const Incident& x) { return x.reportedAt; }, from, to, &first);
+    std::cout << "Incidents reported in [" << from << ", " << to << "]: " << n << "\n";
+
+    DynamicArray<Incident> byId = incidents;
+    quickSort(byId, [](const Incident& a, const Incident& b) { return a.id < b.id; });
+    int pos = binarySearch(byId, [](const Incident& x) { return x.id; }, 25);
+    if (pos >= 0) std::cout << "Binary search id 25: " << byId[pos].type << " - " << byId[pos].description << "\n";
+
+    log.info("Tier-1 demo ran");
     return 0;
 }
