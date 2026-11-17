@@ -9,6 +9,7 @@ Data Structures & Algorithms based disaster-response system in C++ (DS Lab, JIIT
 
 ## Layout
 - `include/nexa/ds/`    hand-written data structures (header-only templates)
+- `include/nexa/algo/`  sorting and searching
 - `include/nexa/model/` Incident, Resource, Hospital
 - `include/nexa/io/`    CSV store, logger
 - `tests/`              one test file per area

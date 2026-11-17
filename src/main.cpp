@@ -2,6 +2,7 @@
 #include <string>
 #include "nexa/ds/priority_queue.h"
 #include "nexa/ds/probing_hash_table.h"
+#include "nexa/ds/avl_tree.h"
 #include "nexa/algo/sort.h"
 #include "nexa/algo/search.h"
 #include "nexa/io/logger.h"
@@ -61,5 +62,19 @@ int main(int argc, char** argv) {
     if (pos >= 0) std::cout << "Binary search id 25: " << byId[pos].type << " - " << byId[pos].description << "\n";
 
     log.info("Tier-1 demo ran");
+
+    // AVL tree demo: incidents indexed by report time (several can share a minute)
+    AvlTree<long long, DynamicArray<int>> timeline;
+    for (int i = 0; i < incidents.size(); i++) timeline.getOrInsert(incidents[i].reportedAt).push_back(i);
+    std::cout << "\nAVL timeline: " << timeline.size() << " distinct times, height " << timeline.height()
+              << ", " << timeline.rotationCount() << " rotations\n";
+    int inWindow = 0;
+    timeline.rangeQuery(from, to, [&](const long long&, DynamicArray<int>& ids) { inWindow += ids.size(); });
+    std::cout << "AVL range [" << from << ", " << to << "]: " << inWindow << " incidents (matches range search above)\n";
+    if (const long long* t = timeline.ceilingKey(1250)) {
+        const Incident& x = incidents[(*timeline.get(*t))[0]];
+        std::cout << "First incident at or after t=1250: #" << x.id << " at t=" << *t << " (" << x.type << ")\n";
+    }
+    log.info("AVL demo ran");
     return 0;
 }
