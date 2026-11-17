@@ -1,8 +1,10 @@
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include "nexa/ds/priority_queue.h"
 #include "nexa/ds/probing_hash_table.h"
 #include "nexa/ds/avl_tree.h"
+#include "nexa/map/city_map.h"
 #include "nexa/algo/sort.h"
 #include "nexa/algo/search.h"
 #include "nexa/io/logger.h"
@@ -76,5 +78,41 @@ int main(int argc, char** argv) {
         std::cout << "First incident at or after t=1250: #" << x.id << " at t=" << *t << " (" << x.type << ")\n";
     }
     log.info("AVL demo ran");
+
+    // Graph demo: road network + Dijkstra to the nearest suitable unit and hospital
+    std::cout << std::fixed << std::setprecision(2);
+    CityMap city;
+    buildCityMap(incidents, resources, hospitals, city);
+    std::cout << "\nRoad network: " << city.g.nodeCount() << " places, " << city.g.edgeCount() << " roads\n";
+    auto unitFor = [](const std::string& type) -> std::string {
+        if (type == "FIRE") return "FIRE_TRUCK";
+        if (type == "FLOOD") return "BOAT";
+        if (type == "COLLAPSE" || type == "EARTHQUAKE") return "RESCUE_TEAM";
+        return "AMBULANCE";   // MEDICAL, ACCIDENT
+    };
+    DynamicArray<Incident> ranked = incidents;
+    mergeSort(ranked, IncidentHigherPriority());
+    for (int k = 0; k < 3 && k < ranked.size(); k++) {
+        int i = linearSearch(incidents, [&](const Incident& x) { return x.id == ranked[k].id; });
+        const Incident& x = incidents[i];
+        std::string want = unitFor(x.type);
+        ShortestPaths sp;
+        int u = nearestTarget(city.g, city.incidentNode(i), [&](int v) {
+            if (!city.isResource(v)) return false;
+            const Resource& r = resources[city.resourceIndex(v)];
+            return r.type == want && r.status == "AVAILABLE";
+        }, sp);
+        std::cout << "  #" << x.id << " " << x.type << " (sev " << x.severity << "): ";
+        if (u < 0) std::cout << "no available " << want;
+        else std::cout << resources[city.resourceIndex(u)].name << ", " << sp.dist[u] << " km away ("
+                       << pathTo(sp, u).size() - 1 << " road hops)";
+        int hNode = nearestTarget(city.g, city.incidentNode(i), [&](int v) {
+            return city.isHospital(v) && hospitals[city.hospitalIndex(v)].freeBeds > 0;
+        }, sp);
+        if (hNode >= 0) std::cout << " | hospital: " << hospitals[city.hospitalIndex(hNode)].name
+                                  << " (" << sp.dist[hNode] << " km)";
+        std::cout << "\n";
+    }
+    log.info("Graph demo ran");
     return 0;
 }
