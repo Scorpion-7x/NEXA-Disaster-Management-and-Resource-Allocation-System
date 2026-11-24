@@ -1,167 +1,99 @@
 #pragma once
-// Open-addressing hash table with linear probing.
-// Companion to the chaining HashTable: same job, different collision strategy,
-// so the two can be compared in the benchmark phase.
-//
-//   insert / find / remove : O(1) average, O(n) worst case
-//   load factor kept <= 0.5 (counting tombstones), capacity is a power of two
-//
-// Deleted slots become tombstones so that probe chains stay intact.
-// A rehash (triggered on insert) throws the tombstones away.
-
-#include <stdexcept>
-#include <string>
+#include <cstddef>
+#include <utility>
+#include "hash_table.h"   // reuses Hash<int> / Hash<std::string>
 
 namespace nexa {
 
-struct DefaultHash {
-    static unsigned long long mix(unsigned long long x) {   // splitmix64 finalizer
-        x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
-        x ^= x >> 27; x *= 0x94d049bb133111ebULL;
-        x ^= x >> 31;
-        return x;
-    }
-    unsigned long long operator()(int k) const { return mix((unsigned long long)(long long)k); }
-    unsigned long long operator()(long long k) const { return mix((unsigned long long)k); }
-    unsigned long long operator()(unsigned k) const { return mix(k); }
-    unsigned long long operator()(const std::string& s) const {   // FNV-1a
-        unsigned long long h = 1469598103934665603ULL;
-        for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
-        return mix(h);
-    }
-};
-
-template <typename K, typename V, typename H = DefaultHash>
+// Hash table with open addressing and linear probing (no chains, one flat array).
+// Deleted slots become tombstones so later probe sequences are not cut short.
+// Capacity is a power of two, so the slot index is hash & (cap - 1).
+// Rehashes when (live + tombstones) exceeds 0.5 of capacity, which keeps probe
+// sequences short. Search/Insert/Remove: O(1) avg, O(n) worst.
+template <typename K, typename V, typename H = Hash<K>>
 class ProbingHashTable {
-    enum : unsigned char { EMPTY = 0, FULL = 1, DELETED = 2 };
+    enum State : unsigned char { EMPTY, FULL, DELETED };
+    struct Slot { K key; V val; State st = EMPTY; };
 
-    K* keys_;
-    V* vals_;
-    unsigned char* state_;
-    int cap_;      // always a power of two
-    int n_;        // FULL slots
-    int used_;     // FULL + DELETED slots
+    Slot* s_;
+    size_t cap_, size_, tomb_;
     H hash_;
+    mutable size_t probes_ = 0;   // total slots inspected, for the analysis report
 
-    int home(const K& k) const { return (int)(hash_(k) & (unsigned long long)(cap_ - 1)); }
+    size_t home(const K& k) const { return hash_(k) & (cap_ - 1); }
 
-    void allocate(int cap) {
-        cap_ = cap;
-        keys_ = new K[cap];
-        vals_ = new V[cap];
-        state_ = new unsigned char[cap];
-        for (int i = 0; i < cap; i++) state_[i] = EMPTY;
-        n_ = used_ = 0;
-    }
-    void release() {
-        delete[] keys_; delete[] vals_; delete[] state_;
-        keys_ = nullptr; vals_ = nullptr; state_ = nullptr;
-        cap_ = n_ = used_ = 0;
-    }
-
-    void rehash(int newCap) {
-        K* ok = keys_; V* ov = vals_; unsigned char* os = state_; int oc = cap_;
-        allocate(newCap);
-        for (int i = 0; i < oc; i++) {
-            if (os[i] != FULL) continue;
-            int j = home(ok[i]);
-            while (state_[j] == FULL) j = (j + 1) & (cap_ - 1);
-            keys_[j] = ok[i]; vals_[j] = ov[i]; state_[j] = FULL;
-            n_++; used_++;
+    // Returns the slot holding k, or cap_ if not present.
+    size_t findSlot(const K& k) const {
+        size_t i = home(k);
+        for (size_t step = 0; step < cap_; step++, i = (i + 1) & (cap_ - 1)) {
+            probes_++;
+            if (s_[i].st == EMPTY) return cap_;
+            if (s_[i].st == FULL && s_[i].key == k) return i;
         }
-        delete[] ok; delete[] ov; delete[] os;
+        return cap_;
     }
 
-    // index of k, or -1
-    int locate(const K& k) const {
-        if (cap_ == 0) return -1;
-        int i = home(k);
-        for (int step = 0; step < cap_; step++) {
-            if (state_[i] == EMPTY) return -1;
-            if (state_[i] == FULL && keys_[i] == k) return i;
-            i = (i + 1) & (cap_ - 1);
-        }
-        return -1;
+    void rehash(size_t nc) {
+        Slot* old = s_;
+        size_t oc = cap_;
+        s_ = new Slot[nc];
+        cap_ = nc; size_ = 0; tomb_ = 0;
+        for (size_t i = 0; i < oc; i++)
+            if (old[i].st == FULL) insertFresh(std::move(old[i].key), std::move(old[i].val));
+        delete[] old;
     }
+    // Insert a key known not to be present, into a table with free space.
+    void insertFresh(K k, V v) {
+        size_t i = home(k);
+        while (s_[i].st == FULL) i = (i + 1) & (cap_ - 1);
+        if (s_[i].st == DELETED) tomb_--;
+        s_[i].key = std::move(k); s_[i].val = std::move(v); s_[i].st = FULL;
+        size_++;
+    }
+    static size_t roundUpPow2(size_t n) { size_t p = 8; while (p < n) p <<= 1; return p; }
 
 public:
-    explicit ProbingHashTable(int initialCap = 16) {
-        int c = 8;
-        while (c < initialCap) c <<= 1;
-        allocate(c);
-    }
-    ~ProbingHashTable() { release(); }
-
+    explicit ProbingHashTable(size_t cap = 16)
+        : s_(new Slot[roundUpPow2(cap)]), cap_(roundUpPow2(cap)), size_(0), tomb_(0) {}
+    ~ProbingHashTable() { delete[] s_; }
     ProbingHashTable(const ProbingHashTable&) = delete;
     ProbingHashTable& operator=(const ProbingHashTable&) = delete;
 
-    ProbingHashTable(ProbingHashTable&& o) noexcept
-        : keys_(o.keys_), vals_(o.vals_), state_(o.state_),
-          cap_(o.cap_), n_(o.n_), used_(o.used_), hash_(o.hash_) {
-        o.keys_ = nullptr; o.vals_ = nullptr; o.state_ = nullptr;
-        o.cap_ = o.n_ = o.used_ = 0;
+    void put(const K& k, const V& v) {          // insert or update
+        size_t i = findSlot(k);
+        if (i != cap_) { s_[i].val = v; return; }
+        if ((size_ + tomb_ + 1) * 2 > cap_)
+            rehash(size_ + 1 > cap_ / 4 ? cap_ * 2 : cap_);   // mostly tombstones: clean in place
+        insertFresh(k, v);
     }
-    ProbingHashTable& operator=(ProbingHashTable&& o) noexcept {
-        if (this != &o) {
-            release();
-            keys_ = o.keys_; vals_ = o.vals_; state_ = o.state_;
-            cap_ = o.cap_; n_ = o.n_; used_ = o.used_; hash_ = o.hash_;
-            o.keys_ = nullptr; o.vals_ = nullptr; o.state_ = nullptr;
-            o.cap_ = o.n_ = o.used_ = 0;
-        }
-        return *this;
+    V* get(const K& k) {
+        size_t i = findSlot(k);
+        return i == cap_ ? nullptr : &s_[i].val;
     }
-
-    // Returns true if k was new, false if an existing value was overwritten.
-    bool insert(const K& k, const V& v) {
-        if (cap_ == 0) allocate(8);                 // reuse after being moved from
-        int existing = locate(k);
-        if (existing >= 0) { vals_[existing] = v; return false; }
-
-        if ((used_ + 1) * 2 > cap_) {
-            // grow if live keys need it, otherwise same size just clears tombstones
-            rehash((n_ + 1) * 4 > cap_ ? cap_ * 2 : cap_);
-        }
-        int i = home(k);
-        while (state_[i] == FULL) i = (i + 1) & (cap_ - 1);
-        if (state_[i] == EMPTY) used_++;            // reusing a tombstone keeps used_ the same
-        keys_[i] = k; vals_[i] = v; state_[i] = FULL;
-        n_++;
-        return true;
-    }
-
-    V* find(const K& k) { int i = locate(k); return i < 0 ? nullptr : &vals_[i]; }
-    const V* find(const K& k) const { int i = locate(k); return i < 0 ? nullptr : &vals_[i]; }
-    bool contains(const K& k) const { return locate(k) >= 0; }
-
-    V& get(const K& k) {
-        int i = locate(k);
-        if (i < 0) throw std::out_of_range("ProbingHashTable::get: key not found");
-        return vals_[i];
-    }
-
+    const V* get(const K& k) const { return const_cast<ProbingHashTable*>(this)->get(k); }
+    bool contains(const K& k) const { return get(k) != nullptr; }
     bool remove(const K& k) {
-        int i = locate(k);
-        if (i < 0) return false;
-        state_[i] = DELETED;
-        keys_[i] = K(); vals_[i] = V();             // drop any heap memory the slot held
-        n_--;
+        size_t i = findSlot(k);
+        if (i == cap_) return false;
+        s_[i].st = DELETED;
+        s_[i].key = K(); s_[i].val = V();   // release strings etc.
+        size_--; tomb_++;
         return true;
     }
-
-    void clear() { release(); allocate(8); }
-
-    // fn(const K&, V&) for every entry, in slot order
-    template <typename Fn>
-    void forEach(Fn fn) {
-        for (int i = 0; i < cap_; i++) if (state_[i] == FULL) fn(keys_[i], vals_[i]);
+    void clear() {
+        for (size_t i = 0; i < cap_; i++) { s_[i] = Slot(); }
+        size_ = 0; tomb_ = 0;
     }
-
-    int size() const { return n_; }
-    bool empty() const { return n_ == 0; }
-    int capacity() const { return cap_; }
-    int tombstones() const { return used_ - n_; }
-    double loadFactor() const { return cap_ ? (double)used_ / cap_ : 0.0; }
+    template <typename F> void for_each(F f) {
+        for (size_t i = 0; i < cap_; i++)
+            if (s_[i].st == FULL) f(s_[i].key, s_[i].val);
+    }
+    size_t size() const { return size_; }
+    size_t capacity() const { return cap_; }
+    size_t tombstones() const { return tomb_; }
+    double loadFactor() const { return static_cast<double>(size_) / cap_; }
+    size_t probeCount() const { return probes_; }
+    void resetProbeCount() const { probes_ = 0; }
 };
 
-} // namespace nexa
+}  // namespace nexa
