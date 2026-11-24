@@ -3,3 +3,4 @@ logs/*.log
 test_tmp/
 *.exe
 *.o
+saved/
