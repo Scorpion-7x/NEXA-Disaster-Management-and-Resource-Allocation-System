@@ -35,10 +35,23 @@ struct SimReport {
     int resolved = 0;               // incidents cleared during the run
     int stillOpen = 0;              // OPEN at the end
     int peakOpen = 0;               // most incidents waiting for a unit at one time
-    int answered = 0;               // new incidents whose unit reached the scene
-    double avgResponse = 0, medianResponse = 0, p90Response = 0, maxResponse = 0;   // minutes, report -> on scene
-    double avgWait = 0;             // minutes, report -> dispatch (time spent waiting for a free unit)
+    int answered = 0;               // new incidents a unit actually reached before the run ended
+
+    // Response time = report -> first unit on scene, in minutes.
+    // "All" counts EVERY new incident: one nobody reached yet counts as the time it has waited so far
+    // (a lower bound). Averaging only the reached ones would hide the worst cases (survivorship bias).
+    double avgAll = 0, medianAll = 0, p90All = 0, maxAll = 0;
+    // Only the incidents that were reached (useful, but flatters a system that leaves people waiting).
+    double avgResponse = 0, medianResponse = 0, p90Response = 0, maxResponse = 0;
+    double avgWait = 0;             // minutes, report -> dispatch, for dispatched new incidents
     double utilization = 0;         // fraction of unit-time spent busy
+
+    // by severity band: 0 = minor 1-3, 1 = serious 4-7, 2 = critical 8-10
+    int sevTotal[3] = {0, 0, 0};
+    int sevReached[3] = {0, 0, 0};
+    double sevMedianReached[3] = {0, 0, 0};
+    double sevAvgAll[3] = {0, 0, 0};
+    double sevP90All[3] = {0, 0, 0};
     // per unit type: AMBULANCE, FIRE_TRUCK, RESCUE_TEAM, BOAT
     int typeAnswered[4] = {0, 0, 0, 0};
     int typeOpen[4] = {0, 0, 0, 0};
@@ -77,7 +90,7 @@ private:
     DynamicArray<long long> busySince_;      // by resource index, -1 if free
     double busyMinutes_ = 0;
     SimReport rep_;
-    DynamicArray<double> responses_;
+    DynamicArray<long long> onSceneAt_;      // by incident index, first unit on scene this run, -1 if none
     double waitSum_ = 0;
     int waitCount_ = 0;
     double typeRespSum_[TYPE_COUNT] = {0, 0, 0, 0};
@@ -96,7 +109,9 @@ private:
     }
 
     void growTables() {
-        while (dispatchedAt_.size() < sys_.incidents.size()) { dispatchedAt_.push_back(-1); newThisRun_.push_back(false); }
+        while (dispatchedAt_.size() < sys_.incidents.size()) {
+            dispatchedAt_.push_back(-1); newThisRun_.push_back(false); onSceneAt_.push_back(-1);
+        }
     }
 
     void markBusy(int r, long long t) { if (busySince_[r] < 0) busySince_[r] = t; }
@@ -175,6 +190,21 @@ private:
         int idx = (int)(p * (sorted.size() - 1) + 0.5);
         return sorted[idx];
     }
+    struct Stats { double avg = 0, median = 0, p90 = 0, max = 0; };
+    // Sorts v and returns average / median / 90th percentile / max (all 0 for an empty list).
+    static Stats summarize(DynamicArray<double>& v) {
+        Stats st;
+        if (v.size() == 0) return st;
+        double sum = 0;
+        for (double x : v) sum += x;
+        mergeSort(v, [](double a, double b) { return a < b; });
+        st.avg = sum / v.size();
+        st.median = percentile(v, 0.5);
+        st.p90 = percentile(v, 0.9);
+        st.max = v[v.size() - 1];
+        return st;
+    }
+    static int sevBand(int severity) { return severity <= 3 ? 0 : (severity <= 7 ? 1 : 2); }
 
 public:
     explicit Simulator(NexaSystem& sys) : sys_(sys) {}
@@ -185,10 +215,9 @@ public:
         while (!events_.empty()) events_.pop();
         seq_ = 0;
         rep_ = SimReport();
-        responses_.clear();
         waitSum_ = 0; waitCount_ = 0; busyMinutes_ = 0;
         for (int t = 0; t < TYPE_COUNT; t++) typeRespSum_[t] = 0;
-        dispatchedAt_.clear(); newThisRun_.clear(); busySince_.clear();
+        dispatchedAt_.clear(); newThisRun_.clear(); onSceneAt_.clear(); busySince_.clear();
         growTables();
         for (int r = 0; r < sys_.resources.size(); r++) busySince_.push_back(-1);
 
@@ -221,12 +250,11 @@ public:
                 schedule(nextArrival(e.t), ARRIVAL);
             } else if (e.kind == ON_SCENE) {
                 const Incident& x = sys_.incidents[e.incident];
-                if (newThisRun_[e.incident]) {
-                    double resp = (double)(e.t - x.reportedAt);
-                    responses_.push_back(resp);
+                if (newThisRun_[e.incident] && onSceneAt_[e.incident] < 0) {
+                    onSceneAt_[e.incident] = e.t;
                     int ti = typeIndex(sys_.resources[e.resource].type);
                     rep_.typeAnswered[ti]++;
-                    typeRespSum_[ti] += resp;
+                    typeRespSum_[ti] += (double)(e.t - x.reportedAt);
                 }
                 schedule(e.t + workMin(x.severity), CLEARED, e.incident, e.resource);
             } else if (e.kind == CLEARED) {
@@ -252,15 +280,27 @@ public:
             rep_.stillOpen++;
             rep_.typeOpen[typeIndex(NexaSystem::unitFor(x.type))]++;
         }
-        rep_.answered = responses_.size();
-        if (rep_.answered > 0) {
-            double sum = 0;
-            for (double v : responses_) sum += v;
-            mergeSort(responses_, [](double a, double b) { return a < b; });
-            rep_.avgResponse = sum / rep_.answered;
-            rep_.medianResponse = percentile(responses_, 0.5);
-            rep_.p90Response = percentile(responses_, 0.9);
-            rep_.maxResponse = responses_[responses_.size() - 1];
+        DynamicArray<double> all, reached, bandAll[3], bandReached[3];
+        for (int i = 0; i < sys_.incidents.size(); i++) {
+            if (!newThisRun_[i]) continue;
+            const Incident& x = sys_.incidents[i];
+            int b = sevBand(x.severity);
+            rep_.sevTotal[b]++;
+            bool got = onSceneAt_[i] >= 0;
+            double t = (double)((got ? onSceneAt_[i] : end) - x.reportedAt);   // not reached: waited until the end
+            all.push_back(t);
+            bandAll[b].push_back(t);
+            if (got) { reached.push_back(t); bandReached[b].push_back(t); rep_.sevReached[b]++; }
+        }
+        rep_.answered = reached.size();
+        Stats a = summarize(all), r = summarize(reached);
+        rep_.avgAll = a.avg; rep_.medianAll = a.median; rep_.p90All = a.p90; rep_.maxAll = a.max;
+        rep_.avgResponse = r.avg; rep_.medianResponse = r.median; rep_.p90Response = r.p90; rep_.maxResponse = r.max;
+        for (int b = 0; b < 3; b++) {
+            rep_.sevMedianReached[b] = summarize(bandReached[b]).median;
+            Stats ba = summarize(bandAll[b]);
+            rep_.sevAvgAll[b] = ba.avg;
+            rep_.sevP90All[b] = ba.p90;
         }
         rep_.avgWait = waitCount_ ? waitSum_ / waitCount_ : 0;
         for (int t = 0; t < TYPE_COUNT; t++)

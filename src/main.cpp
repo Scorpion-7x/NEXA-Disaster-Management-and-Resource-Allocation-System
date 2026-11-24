@@ -309,18 +309,33 @@ int main(int argc, char** argv) {
             Simulator sim(sys);
             SimReport r = sim.run(cfg);
             std::cout << "\n  Simulated t=" << r.start << " to t=" << r.end << " (" << hours << " h)\n"
-                      << "  New incidents: " << r.arrivals << "   Dispatches: " << r.dispatched
-                      << "   Resolved: " << r.resolved << "   Still open: " << r.stillOpen
-                      << "   Peak waiting: " << r.peakOpen << "\n";
-            if (r.answered > 0)
-                std::cout << "  Response time for new incidents (report -> unit on scene), minutes:\n"
-                          << "    average " << r.avgResponse << "   median " << r.medianResponse
-                          << "   90% within " << r.p90Response << "   worst " << r.maxResponse << "\n"
-                          << "  Average wait for a free unit: " << r.avgWait << " min\n";
+                      << "  Dispatches: " << r.dispatched << "   Resolved: " << r.resolved
+                      << "   Still open: " << r.stillOpen << "   Peak waiting: " << r.peakOpen << "\n";
+            if (r.arrivals > 0) {
+                std::cout << "  New incidents: " << r.arrivals << ", reached by a unit: " << r.answered << " ("
+                          << 100.0 * r.answered / r.arrivals << "%)\n"
+                          << "  Response time in minutes, counting EVERY new incident\n"
+                          << "  (one not reached yet counts as the time it has waited so far):\n"
+                          << "    average " << r.avgAll << "   median " << r.medianAll << "   90% within " << r.p90All
+                          << "   worst " << r.maxAll << "\n";
+                if (r.answered > 0)
+                    std::cout << "  Only the " << r.answered << " reached: average " << r.avgResponse << "   median "
+                              << r.medianResponse << "   (flatters the result if many are still waiting)\n";
+                std::cout << "  Average wait for a free unit: " << r.avgWait << " min\n"
+                          << "  By severity            reached   median if reached   avg (all)   90% within (all)\n";
+                const char* bands[3] = {"minor    (1-3)", "serious  (4-7)", "critical (8-10)"};
+                for (int b = 2; b >= 0; b--) {
+                    if (r.sevTotal[b] == 0) continue;
+                    std::cout << "    " << std::left << std::setw(17) << bands[b] << std::right
+                              << std::setw(4) << r.sevReached[b] << "/" << std::left << std::setw(4) << r.sevTotal[b] << std::right
+                              << std::setw(14) << r.sevMedianReached[b] << std::setw(17) << r.sevAvgAll[b]
+                              << std::setw(16) << r.sevP90All[b] << "\n";
+                }
+            }
             std::cout << "  Unit utilisation: " << r.utilization * 100 << "%\n  By unit type:\n";
             for (int t = 0; t < Simulator::TYPE_COUNT; t++) {
                 std::cout << "    " << std::left << std::setw(12) << Simulator::typeName(t) << std::right
-                          << std::setw(4) << r.typeAnswered[t] << " answered";
+                          << std::setw(4) << r.typeAnswered[t] << " reached";
                 if (r.typeAnswered[t]) std::cout << ", avg " << r.typeAvgResponse[t] << " min";
                 if (r.typeOpen[t]) std::cout << ", " << r.typeOpen[t] << " still waiting";
                 std::cout << "\n";

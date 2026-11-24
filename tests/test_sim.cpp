@@ -68,6 +68,15 @@ int main() {
         int typeSum = 0;
         for (int t = 0; t < Simulator::TYPE_COUNT; t++) typeSum += r.typeAnswered[t];
         CHECK(typeSum == r.answered);
+        // severity bands cover every new incident exactly once
+        int bandTotal = 0, bandReached = 0;
+        for (int b = 0; b < 3; b++) {
+            bandTotal += r.sevTotal[b]; bandReached += r.sevReached[b];
+            CHECK(r.sevReached[b] <= r.sevTotal[b]);
+        }
+        CHECK(bandTotal == r.arrivals && bandReached == r.answered);
+        // "all" includes the ones still waiting, so it has at least as many cases and a worst case at least as bad
+        CHECK(r.maxAll >= r.maxResponse && r.medianAll <= r.p90All && r.p90All <= r.maxAll);
         CHECK(noDoubleBooking(s) && bedsOk(s));
         // new incidents carry the simulation's timestamps
         bool times = true;
@@ -90,6 +99,21 @@ int main() {
         CHECK(count(s, "OPEN") == 0 && count(s, "DISPATCHED") == 0 && busy(s) == 0);
         CHECK(noDoubleBooking(s) && bedsOk(s));
     }
+    { // light load: everyone gets reached, so "all" and "reached only" must agree exactly
+        NexaSystem s("test_tmp/sim.log");
+        CHECK(s.load(dataDir(), err));
+        Simulator sim(s);
+        SimConfig warm; warm.hours = 72; warm.arrivalsPerHour = 0;   // clear the backlog first
+        sim.run(warm);
+        SimConfig cfg; cfg.hours = 24; cfg.arrivalsPerHour = 0.5; cfg.seed = 5;
+        SimReport r = sim.run(cfg);
+        CHECK(r.arrivals > 0);
+        if (r.answered == r.arrivals) {
+            CHECK(r.avgAll == r.avgResponse && r.medianAll == r.medianResponse && r.maxAll == r.maxResponse);
+        } else {
+            CHECK(r.stillOpen > 0 || r.arrivals - r.answered <= 2);    // only the last few may be en route
+        }
+    }
     { // same seed -> identical run; different seed -> different run
         SimReport a, b, c;
         for (int k = 0; k < 3; k++) {
@@ -100,7 +124,7 @@ int main() {
             SimReport r = sim.run(cfg);
             if (k == 0) a = r; else if (k == 1) b = r; else c = r;
         }
-        CHECK(a.arrivals == b.arrivals && a.resolved == b.resolved && a.avgResponse == b.avgResponse && a.peakOpen == b.peakOpen);
+        CHECK(a.arrivals == b.arrivals && a.resolved == b.resolved && a.avgAll == b.avgAll && a.avgResponse == b.avgResponse && a.peakOpen == b.peakOpen);
         CHECK(a.arrivals != c.arrivals || a.avgResponse != c.avgResponse);
     }
     { // a manual dispatch before the run is carried through by the simulation
