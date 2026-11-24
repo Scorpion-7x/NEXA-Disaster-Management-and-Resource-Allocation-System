@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "test_util.h"
 #include "nexa/ds/kd_tree.h"
 #include "nexa/ds/dynamic_array.h"
@@ -8,6 +9,15 @@ static int rnd(int mod) { g_seed = g_seed * 1103515245u + 12345u; return (int)((
 static double rndD(double lo, double hi) { return lo + (hi - lo) * rnd(1000000) / 1000000.0; }
 
 static double d2(const KDPoint& p, double x, double y) { return (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y); }
+
+// Equal up to floating-point rounding. Optimising compilers may compute the same distance with a
+// different last bit in two places (e.g. fused multiply-add), so exact == is too strict for doubles.
+static bool close(double a, double b) {
+    double m = a > b ? a : b;
+    if (m < 1e-300) return true;
+    double diff = a > b ? a - b : b - a;
+    return diff <= 1e-9 * m;
+}
 
 // Brute force reference: nearest id passing ok, or -1
 template <typename Pred>
@@ -71,21 +81,34 @@ int main() {
             double bd, td;
             bruteNearest(pts, x, y, [](int) { return true; }, bd);
             t.nearest(x, y, &td);
-            if (td != bd) same = false;             // compare distance: ties may pick different ids
+            if (!close(td, bd)) same = false;       // compare distance: ties may pick different ids
             bruteNearest(pts, x, y, even, bd);
             int id = t.nearest(x, y, even, &td);
-            if (td != bd || id % 2 != 0) sameFiltered = false;
+            if (!close(td, bd) || id % 2 != 0) sameFiltered = false;
 
-            // kNearest: the k-th distance must equal the brute-force k-th distance
+            // kNearest: the K distances returned must be the K smallest distances overall, nearest first.
+            // (Compare distances, not ids: points at equal distance may come back in either order.)
             const int K = 7;
-            int ids[K];
+            int ids[K] = {0};
             int m = t.kNearest(x, y, K, ids);
-            if (m != K) sameK = false;
-            for (int i = 1; i < m; i++) if (d2(pts[ids[i]], x, y) < d2(pts[ids[i - 1]], x, y)) sameK = false;
-            int closer = 0;                         // points strictly closer than our k-th answer
-            double kth = d2(pts[ids[K - 1]], x, y);
-            for (int i = 0; i < pts.size(); i++) if (d2(pts[i], x, y) < kth) closer++;
-            if (closer > K - 1) sameK = false;
+            double kBest[K];                         // brute force: K smallest distances, kept sorted
+            int have = 0;
+            for (int i = 0; i < pts.size(); i++) {
+                double d = d2(pts[i], x, y);
+                if (have == K && d >= kBest[K - 1]) continue;
+                int j = have < K ? have++ : K - 1;
+                while (j > 0 && kBest[j - 1] > d) { kBest[j] = kBest[j - 1]; j--; }
+                kBest[j] = d;
+            }
+            if (m != K) { sameK = false; std::printf("  kNearest returned %d of %d\n", m, K); }
+            for (int j = 0; j < m; j++) {
+                double got = d2(pts[ids[j]], x, y);
+                if (!close(got, kBest[j])) {
+                    if (sameK) std::printf("  kNearest query %d (%.6f, %.6f): result %d has d2 %.17g, expected %.17g\n",
+                                           q, x, y, j, got, kBest[j]);
+                    sameK = false;
+                }
+            }
 
             // withinRadius and rangeSearch vs brute force counts
             double r = 0.02;
