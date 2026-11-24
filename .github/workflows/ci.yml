@@ -24,7 +24,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure
       - name: Smoke test the program
         run: |
-          printf '4\n15\n2\n3\n1\n1\n0\n' | ./build/nexa
+          printf '4\n15\n2\n3\n1\n4\n16\n2\n3\n1\n2\n1\n0\n' | ./build/nexa
           ./build/nexa --demo > /dev/null
 
   sanitizers:
@@ -44,7 +44,7 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
       - name: Smoke test the program
-        run: printf '4\n15\n2\n3\n1\n1\n0\n' | ./build/nexa
+        run: printf '4\n15\n2\n3\n1\n4\n16\n2\n3\n1\n2\n1\n0\n' | ./build/nexa
 
   windows:
     name: Windows (MSYS2 UCRT64, same toolchain as local)

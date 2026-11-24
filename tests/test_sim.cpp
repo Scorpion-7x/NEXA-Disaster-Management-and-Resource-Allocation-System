@@ -21,17 +21,22 @@ static bool bedsOk(const NexaSystem& s) {
     for (const Hospital& h : s.hospitals) if (h.freeBeds < 0 || h.freeBeds > h.totalBeds) return false;
     return true;
 }
-// Every BUSY unit is on exactly one job, and no incident has two units.
+// Every BUSY unit is on at most one live job, and no incident has two live units.
+// (A diverted deployment stays in the history but is no longer live.)
 static bool noDoubleBooking(NexaSystem& s) {
     for (int r = 0; r < s.resources.size(); r++) {
         int active = 0;
         s.deployments().forEachInCol(r, [&](MultiLinkedList<Deployment>::Node& d) {
-            if (s.incidents[d.row].status == "DISPATCHED") active++;
+            if (!d.val.diverted && s.incidents[d.row].status == "DISPATCHED") active++;
         });
         if (active > 1) return false;
         if (active == 1 && s.resources[r].status != "BUSY") return false;
     }
-    for (int i = 0; i < s.incidents.size(); i++) if (s.deployments().rowSize(i) > 1) return false;
+    for (int i = 0; i < s.incidents.size(); i++) {
+        int live = 0;
+        s.deployments().forEachInRow(i, [&](MultiLinkedList<Deployment>::Node& d) { if (!d.val.diverted) live++; });
+        if (live > 1) return false;
+    }
     return true;
 }
 
@@ -153,6 +158,85 @@ int main() {
         sim2.run(drain);
         CHECK(count(t, "OPEN") == 0 && count(t, "DISPATCHED") == 0 && busy(t) == 0);
         CHECK(noDoubleBooking(t) && bedsOk(t));
+    }
+    { // pre-emption: only minor jobs lose their unit, only to critical incidents, and everything still drains
+        int totalPreempt = 0;
+        for (unsigned seed = 1; seed <= 6; seed++) {
+            NexaSystem s("test_tmp/sim.log");
+            CHECK(s.load(dataDir(), err));
+            Simulator sim(s);
+            SimConfig cfg; cfg.hours = 12; cfg.arrivalsPerHour = 6; cfg.seed = seed; cfg.preempt = true;
+            SimReport r = sim.run(cfg);
+            totalPreempt += r.preemptions;
+            CHECK(noDoubleBooking(s) && bedsOk(s));
+            int diverted = 0;
+            bool rules = true;
+            for (int u = 0; u < s.resources.size(); u++) {
+                for (auto* n = s.deployments().colFirst(u); n; n = n->nextInCol) {
+                    if (!n->val.diverted) continue;
+                    diverted++;
+                    if (s.incidents[n->row].severity > cfg.preemptMaxVictim) rules = false;   // victim was minor
+                    if (!n->nextInCol || s.incidents[n->nextInCol->row].severity < cfg.preemptMinSeverity) rules = false;
+                }
+            }
+            CHECK(rules);
+            CHECK(diverted == r.preemptions);
+            SimConfig drain; drain.hours = 120; drain.arrivalsPerHour = 0; drain.preempt = true;
+            sim.run(drain);
+            CHECK(count(s, "OPEN") == 0 && count(s, "DISPATCHED") == 0 && busy(s) == 0);   // bumped incidents got served
+            CHECK(noDoubleBooking(s) && bedsOk(s));
+        }
+        CHECK(totalPreempt > 0);                                 // the scenario really exercises pre-emption
+    }
+    { // ageing never lets a non-critical incident be served while a critical one could be
+        NexaSystem s("test_tmp/sim.log");
+        CHECK(s.load(dataDir(), err));
+        DispatchPolicy p; p.aging = true;
+        s.setPolicy(p);
+        s.advanceClock(s.now() + 600);                           // everything has waited 10 hours: maximum boost
+        bool criticalFirst = true;
+        for (;;) {
+            DispatchResult d = s.dispatchNext();
+            if (d.incident < 0) break;
+            if (s.incidents[d.incident].severity >= p.criticalSeverity) continue;
+            for (const Incident& x : s.incidents) {
+                if (x.status != "OPEN" || x.severity < p.criticalSeverity) continue;
+                for (const Resource& u : s.resources)
+                    if (u.type == NexaSystem::unitFor(x.type) && u.status == "AVAILABLE") criticalFirst = false;
+            }
+        }
+        CHECK(criticalFirst);
+        // Among non-critical incidents ageing does change the order: an old minor fire beats a fresh,
+        // slightly more serious one. Start from an empty backlog so only these two compete.
+        auto clearBacklog = [&](NexaSystem& sys) {
+            for (int round = 0; round < 20 && count(sys, "OPEN") > 0; round++) {
+                while (sys.dispatchNext().incident >= 0) {}
+                for (const Incident& x : sys.incidents) if (x.status == "DISPATCHED") sys.resolveIncident(x.id, err);
+            }
+        };
+        NexaSystem a("test_tmp/sim.log"), b("test_tmp/sim.log");
+        CHECK(a.load(dataDir(), err) && b.load(dataDir(), err));
+        clearBacklog(a); clearBacklog(b);
+        CHECK(count(a, "OPEN") == 0 && count(b, "OPEN") == 0);
+        a.setPolicy(p);
+        for (NexaSystem* sys : {&a, &b}) {
+            long long t = sys->now() + 1;
+            sys->reportIncident("FIRE", 3, 28.57, 77.36, "old minor fire", t);
+            sys->reportIncident("FIRE", 5, 28.58, 77.37, "new serious fire", t + 120);   // 2 hours later
+        }
+        DispatchResult da = a.dispatchNext(), db = b.dispatchNext();
+        CHECK(da.resource >= 0 && db.resource >= 0);
+        CHECK(a.incidents[da.incident].severity == 3);           // ageing: 3 + 3 (waited 120 min) = 6 > 5
+        CHECK(b.incidents[db.incident].severity == 5);           // basic: severity first
+    }
+    { // ageing in a full simulation keeps every invariant
+        NexaSystem s("test_tmp/sim.log");
+        CHECK(s.load(dataDir(), err));
+        Simulator sim(s);
+        SimConfig cfg; cfg.hours = 12; cfg.arrivalsPerHour = 6; cfg.seed = 4; cfg.policy.aging = true; cfg.preempt = true;
+        sim.run(cfg);
+        CHECK(noDoubleBooking(s) && bedsOk(s));
+        CHECK(!s.policy().aging);                                // manual dispatch goes back to the default policy
     }
     TEST_END();
 }

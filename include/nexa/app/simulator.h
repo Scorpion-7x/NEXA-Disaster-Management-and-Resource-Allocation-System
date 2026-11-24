@@ -26,6 +26,10 @@ struct SimConfig {
     double speedKmh = 30;           // average city driving speed
     int turnoutMin = 2;             // time from dispatch to wheels rolling
     int handoverMin = 10;           // time at the hospital when a casualty is taken there
+    DispatchPolicy policy;          // ageing on/off (see NexaSystem)
+    bool preempt = false;           // critical incidents may take a unit still driving to a minor one
+    int preemptMinSeverity = 8;     // who may pre-empt
+    int preemptMaxVictim = 4;       // whose unit may be taken
 };
 
 struct SimReport {
@@ -36,6 +40,7 @@ struct SimReport {
     int stillOpen = 0;              // OPEN at the end
     int peakOpen = 0;               // most incidents waiting for a unit at one time
     int answered = 0;               // new incidents a unit actually reached before the run ended
+    int preemptions = 0;            // units diverted from a minor incident to a critical one
 
     // Response time = report -> first unit on scene, in minutes.
     // "All" counts EVERY new incident: one nobody reached yet counts as the time it has waited so far
@@ -73,7 +78,9 @@ private:
         long long seq = 0;          // tie-break: events at the same minute run in scheduling order
         Kind kind = ARRIVAL;
         int incident = -1, resource = -1;
+        int job = 0;                // the unit's job number when scheduled; stale if the unit was diverted
     };
+    enum Phase { IDLE, EN_ROUTE, ON_SCENE_PHASE, RETURNING };
     struct EarlierFirst {
         bool operator()(const Event& a, const Event& b) const { return a.t != b.t ? a.t < b.t : a.seq < b.seq; }
     };
@@ -88,6 +95,7 @@ private:
     DynamicArray<long long> dispatchedAt_;   // by incident index, -1 if not dispatched in this run
     DynamicArray<bool> newThisRun_;          // incident reported during this run
     DynamicArray<long long> busySince_;      // by resource index, -1 if free
+    DynamicArray<int> phase_, job_;          // by resource index
     double busyMinutes_ = 0;
     SimReport rep_;
     DynamicArray<long long> onSceneAt_;      // by incident index, first unit on scene this run, -1 if none
@@ -95,7 +103,11 @@ private:
     int waitCount_ = 0;
     double typeRespSum_[TYPE_COUNT] = {0, 0, 0, 0};
 
-    void schedule(long long t, Kind k, int i = -1, int r = -1) { events_.push(Event{t, seq_++, k, i, r}); }
+    void schedule(long long t, Kind k, int i = -1, int r = -1) {
+        events_.push(Event{t, seq_++, k, i, r, r >= 0 ? job_[r] : 0});
+    }
+    // A new assignment for unit r: bumping the job number makes its older pending events stale.
+    void startJob(int r, int phase) { job_[r]++; phase_[r] = phase; }
 
     long long travelMin(double km) const {
         long long m = (long long)(km / cfg_.speedKmh * 60.0 + 0.5);
@@ -142,15 +154,39 @@ private:
             if (d.incident < 0 || d.resource < 0) break;
             growTables();
             rep_.dispatched++;
+            const Incident& x = sys_.incidents[d.incident];
+            if (newThisRun_[d.incident] && dispatchedAt_[d.incident] < 0) { waitSum_ += (double)(t - x.reportedAt); waitCount_++; }
             dispatchedAt_[d.incident] = t;
             markBusy(d.resource, t);
-            const Incident& x = sys_.incidents[d.incident];
-            if (newThisRun_[d.incident]) { waitSum_ += (double)(t - x.reportedAt); waitCount_++; }
+            startJob(d.resource, EN_ROUTE);
             schedule(t + cfg_.turnoutMin + travelMin(d.km), ON_SCENE, d.incident, d.resource);
         }
+        if (cfg_.preempt) preemptAll(t);
         int open = 0;
         for (const Incident& x : sys_.incidents) if (x.status == "OPEN") open++;
         if (open > rep_.peakOpen) rep_.peakOpen = open;
+    }
+
+    // Critical incidents still without a unit take one that is only driving to a minor incident.
+    void preemptAll(long long t) {
+        DynamicArray<int> open = sys_.incidentsByPriority("OPEN");
+        for (int i : open) {
+            if (sys_.incidents[i].severity < cfg_.preemptMinSeverity) break;   // sorted: the rest are less severe
+            DispatchResult d = sys_.preemptFor(i, [&](int r) {
+                if (phase_[r] != EN_ROUTE) return false;                       // never pull a crew off a scene
+                int victim = sys_.activeIncidentOf(r);
+                return victim >= 0 && sys_.incidents[victim].severity <= cfg_.preemptMaxVictim;
+            });
+            if (d.resource < 0) continue;
+            growTables();
+            rep_.preemptions++;
+            rep_.dispatched++;
+            const Incident& x = sys_.incidents[i];
+            if (newThisRun_[i] && dispatchedAt_[i] < 0) { waitSum_ += (double)(t - x.reportedAt); waitCount_++; }
+            dispatchedAt_[i] = t;
+            startJob(d.resource, EN_ROUTE);                                    // its old ON_SCENE event is now stale
+            schedule(t + travelMin(d.km), ON_SCENE, i, d.resource);            // already rolling: no turnout time
+        }
     }
 
     // Recreates pending events for jobs that were already under way when this run started.
@@ -160,24 +196,24 @@ private:
         for (int r = 0; r < sys_.resources.size(); r++) {
             if (sys_.resources[r].status != "BUSY") continue;
             markBusy(r, now);
-            MultiLinkedList<Deployment>::Node* last = dep.colLast(r);
-            bool active = last && sys_.incidents[last->row].status == "DISPATCHED";
-            if (!active) {
+            int active = sys_.activeIncidentOf(r);
+            if (active < 0) {
                 // busy on a job NEXA has no record of (e.g. BUSY in the input data): assume it returns soon
+                startJob(r, RETURNING);
                 schedule(now + externalReturn(rng_), BACK, -1, r);
                 continue;
             }
-            const Deployment& d = last->val;
+            const Deployment& d = dep.colLast(r)->val;
             long long arrive = d.at + cfg_.turnoutMin + travelMin(d.km);
-            long long cleared = arrive + workMin(sys_.incidents[last->row].severity);
-            if (now < arrive) schedule(arrive, ON_SCENE, last->row, r);
-            else if (now < cleared) schedule(cleared, CLEARED, last->row, r);
-            else schedule(now, CLEARED, last->row, r);
+            long long cleared = arrive + workMin(sys_.incidents[active].severity);
+            if (now < arrive) { startJob(r, EN_ROUTE); schedule(arrive, ON_SCENE, active, r); }
+            else if (now < cleared) { startJob(r, ON_SCENE_PHASE); schedule(cleared, CLEARED, active, r); }
+            else { startJob(r, ON_SCENE_PHASE); schedule(now, CLEARED, active, r); }
         }
     }
 
-    long long returnMin(int incident, int r) {
-        MultiLinkedList<Deployment>::Node* n = sys_.deployments().find(incident, r);
+    long long returnMin(int r) {
+        MultiLinkedList<Deployment>::Node* n = sys_.deployments().colLast(r);   // the unit's current job
         if (!n) return 30;
         const Deployment& d = n->val;
         if (d.hospital >= 0)   // to the hospital, hand over, then roughly back the way it came
@@ -219,7 +255,9 @@ public:
         for (int t = 0; t < TYPE_COUNT; t++) typeRespSum_[t] = 0;
         dispatchedAt_.clear(); newThisRun_.clear(); onSceneAt_.clear(); busySince_.clear();
         growTables();
-        for (int r = 0; r < sys_.resources.size(); r++) busySince_.push_back(-1);
+        phase_.clear(); job_.clear();
+        for (int r = 0; r < sys_.resources.size(); r++) { busySince_.push_back(-1); phase_.push_back(IDLE); job_.push_back(0); }
+        sys_.setPolicy(cfg.policy);
 
         const long long start = sys_.now(), end = start + 60LL * cfg.hours;
         rep_.start = start; rep_.end = end;
@@ -244,6 +282,7 @@ public:
 
         while (!events_.empty() && events_.top().t <= end) {
             Event e = events_.pop();
+            if (e.resource >= 0 && e.job != job_[e.resource]) continue;      // the unit was diverted: stale
             sys_.advanceClock(e.t);
             if (e.kind == ARRIVAL) {
                 generateIncident(e.t, latLo, latHi, lonLo, lonHi);
@@ -256,18 +295,22 @@ public:
                     rep_.typeAnswered[ti]++;
                     typeRespSum_[ti] += (double)(e.t - x.reportedAt);
                 }
+                phase_[e.resource] = ON_SCENE_PHASE;
                 schedule(e.t + workMin(x.severity), CLEARED, e.incident, e.resource);
             } else if (e.kind == CLEARED) {
                 if (sys_.incidents[e.incident].status == "DISPATCHED") rep_.resolved++;
                 sys_.markResolved(e.incident);
-                schedule(e.t + returnMin(e.incident, e.resource), BACK, e.incident, e.resource);
+                phase_[e.resource] = RETURNING;
+                schedule(e.t + returnMin(e.resource), BACK, e.incident, e.resource);
             } else {   // BACK
+                phase_[e.resource] = IDLE;
                 sys_.releaseUnit(e.resource);
                 markFree(e.resource, e.t);
             }
             dispatchAll(e.t);
         }
         sys_.advanceClock(end);
+        sys_.setPolicy(DispatchPolicy());   // manual dispatches from the menu use the default policy again
         sys_.clearUndo();   // dispatches made by the simulation are not user actions to undo
 
         // ---- report ----

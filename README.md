@@ -31,6 +31,20 @@ arriving. At the end you get response times (average, median, 90th percentile), 
 long incidents waited for a free unit, utilisation, and a breakdown per unit type.
 Same seed gives the same run, so you can change one thing and compare.
 
+**Option 16, compare dispatch policies**, runs the same scenarios under four policies and
+averages over several seeds (one random day can mislead):
+
+- *basic*: most severe first, then oldest
+- *ageing*: non-critical incidents gain priority while they wait, but never overtake a critical one
+- *pre-emption*: a critical incident (8-10) may take a unit still driving to a minor one (1-4)
+- *both*
+
+What it shows on the default data (20 seeds, 8 h, 4 incidents/h): pre-emption cuts critical
+response times noticeably once there are enough ambulances (about 30 -> 22 min with 8), at
+almost no cost elsewhere. Ageing does not help: the long waits come from too few units of the
+right type, and reordering the queue cannot create a free ambulance. With only 4 ambulances
+no policy helps much; the fleet mix is the real bottleneck.
+
 ## Layout
 
 - `include/nexa/ds/`     hand-written data structures (header-only templates)

@@ -26,6 +26,7 @@ struct Deployment {
     long long at = 0;       // dispatch time (epoch minutes)
     int hospital = -1;      // hospital index, -1 if no bed was needed
     double hospitalKm = 0;  // road distance incident -> hospital
+    bool diverted = false;  // the unit was taken away for a more critical incident before arriving
 };
 
 struct DispatchResult {
@@ -35,7 +36,21 @@ struct DispatchResult {
     double km = 0, hospitalKm = 0;
     int candidates = 0;     // how many KD-tree candidates were compared by road
     int waiting = 0;        // more urgent incidents skipped because no unit of their type was free
+    int bumped = -1;        // pre-emption only: incident index that lost its unit
     std::string neededType;
+};
+
+// How dispatchNext() chooses which OPEN incident to serve next.
+struct DispatchPolicy {
+    // Ageing: effective priority = severity + (minutes waited / agingMinutes), boost capped at maxBoost,
+    // and a non-critical incident never rises above a critical one (it stays below criticalSeverity).
+    // So ageing only reorders the non-critical incidents among themselves: long waiters move up,
+    // but critical incidents are always served first.
+    // Off: strictly severity first, then earliest report (the original behaviour).
+    bool aging = false;
+    double agingMinutes = 30;   // +1 priority level per 30 minutes of waiting
+    double maxBoost = 3;        // a severity-3 incident can rise to at most 6
+    int criticalSeverity = 8;   // 8-10 are critical and are never overtaken
 };
 
 // The whole NEXA workflow in one place. Every data structure has a job here:
@@ -95,6 +110,33 @@ private:
     Stack<Action> undo_;
     long long now_ = 0;
     int nextIncidentId_ = 1;
+    DispatchPolicy policy_;
+
+    double effectivePriority(int i) const {
+        int sev = incidents[i].severity;
+        if (!policy_.aging || sev >= policy_.criticalSeverity) return sev;
+        double boost = (double)(now_ - incidents[i].reportedAt) / policy_.agingMinutes;
+        if (boost > policy_.maxBoost) boost = policy_.maxBoost;
+        if (boost < 0) boost = 0;
+        double p = sev + boost;
+        double ceiling = policy_.criticalSeverity - 0.5;   // stays below every critical incident
+        return p > ceiling ? ceiling : p;
+    }
+    // Reserves the nearest hospital bed for casualty incident i; returns hospital index or -1.
+    int reserveBed(int i, double& km) {
+        km = 0;
+        if (!needsHospital(incidents[i].type)) return -1;
+        ShortestPaths hp;
+        int hn = nearestTarget(city_.g, incNode_[i], [&](int v) {
+            int h = hospitalOfNode(v);
+            return h >= 0 && hospitals[h].freeBeds > 0;
+        }, hp);
+        if (hn < 0) return -1;
+        int h = hospitalOfNode(hn);
+        km = hp.dist[hn];
+        hospitals[h].freeBeds--;
+        return h;
+    }
 
     int resourceOfNode(int v) const { return (v >= city_.resBase && v < city_.hosBase) ? v - city_.resBase : -1; }
     int hospitalOfNode(int v) const {
@@ -152,24 +194,13 @@ private:
         res.km = cost_.get(i, r);
 
         // 4. reserve a hospital bed for casualty incidents (nearest by road with a free bed)
-        if (needsHospital(x.type)) {
-            ShortestPaths hp;
-            int hn = nearestTarget(city_.g, incNode_[i], [&](int v) {
-                int h = hospitalOfNode(v);
-                return h >= 0 && hospitals[h].freeBeds > 0;
-            }, hp);
-            if (hn >= 0) {
-                res.hospital = hospitalOfNode(hn);
-                res.hospitalKm = hp.dist[hn];
-                hospitals[res.hospital].freeBeds--;
-            }
-        }
+        res.hospital = reserveBed(i, res.hospitalKm);
 
         resources[r].status = "BUSY";
         x.status = "DISPATCHED";
         Action a;
         a.type = ACT_DISPATCH; a.incident = i; a.resource = r; a.hospital = res.hospital;
-        a.dep = deployments_.add(i, r, Deployment{res.km, now_, res.hospital, res.hospitalKm});
+        a.dep = deployments_.add(i, r, Deployment{res.km, now_, res.hospital, res.hospitalKm, false});
         undo_.push(a);
         log_.info("Dispatched " + resources[r].name + " to incident #" + std::to_string(x.id) +
                   (res.hospital >= 0 ? ", bed reserved at " + hospitals[res.hospital].name : ""));
@@ -234,8 +265,9 @@ public:
                     int* r = resById_.get(std::stoi(row[1]));
                     if (!i || !r) continue;
                     int h = std::stoi(row[4]);
-                    double hkm = row.size() >= 6 ? std::stod(row[5]) : 0;   // column added later
-                    deployments_.add(*i, *r, Deployment{std::stod(row[2]), std::stoll(row[3]), h, hkm});
+                    double hkm = row.size() >= 6 ? std::stod(row[5]) : 0;   // columns added later
+                    bool div = row.size() >= 7 && row[6] == "1";
+                    deployments_.add(*i, *r, Deployment{std::stod(row[2]), std::stoll(row[3]), h, hkm, div});
                 } catch (...) {}
             }
         }
@@ -266,12 +298,13 @@ public:
             row.push_back(std::to_string(d.val.at));
             row.push_back(std::to_string(d.val.hospital));
             row.push_back(std::to_string(d.val.hospitalKm));
+            row.push_back(d.val.diverted ? "1" : "0");
             rows.push_back(row);
         });
         bool ok = saveIncidents(dir + "/incidents.csv", incidents) &&
                   saveResources(dir + "/resources.csv", resources) &&
                   saveHospitals(dir + "/hospitals.csv", hospitals) &&
-                  writeCsv(dir + "/deployments.csv", "incident_id,resource_id,km,at,hospital,hospital_km", rows);
+                  writeCsv(dir + "/deployments.csv", "incident_id,resource_id,km,at,hospital,hospital_km,diverted", rows);
         CsvTable meta;
         CsvRow clock;
         clock.push_back("now"); clock.push_back(std::to_string(now_));
@@ -325,6 +358,7 @@ public:
     // Dispatches the most urgent OPEN incident that has a free unit of its type.
     DispatchResult dispatchNext() {
         triage();
+        if (policy_.aging) return dispatchNextAging();
         DynamicArray<Urgency> skipped;
         DispatchResult res;
         while (!urgent_.empty()) {
@@ -340,6 +374,78 @@ public:
         res.waiting = skipped.size();
         return res;
     }
+
+    // Ageing policy: priorities change as time passes, so a fixed heap order no longer holds.
+    // Rank the OPEN incidents by their current effective priority (merge sort) and serve the first
+    // one that has a free unit. The heap's entries simply go stale and are skipped later.
+    DispatchResult dispatchNextAging() {
+        DynamicArray<int> open = linearSearchAll(incidents, [](const Incident& x) { return x.status == "OPEN"; });
+        mergeSort(open, [&](int a, int b) {
+            double pa = effectivePriority(a), pb = effectivePriority(b);
+            if (pa != pb) return pa > pb;
+            return IncidentHigherPriority()(incidents[a], incidents[b]);
+        });
+        int skipped = 0;
+        for (int i : open) {
+            DispatchResult res = allocate(i);
+            if (res.resource >= 0) { res.waiting = skipped; return res; }
+            skipped++;
+        }
+        DispatchResult none;
+        none.waiting = skipped;
+        return none;
+    }
+
+    // Pre-emption: give critical incident `to` a unit that is busy elsewhere, chosen from the units
+    // for which canTake(resource) is true (the simulator allows only units still driving to a
+    // minor incident). The nearest such unit by road is diverted; the incident it was heading to
+    // goes back to OPEN and its hospital bed is released. Returns resource = -1 if none qualifies.
+    template <typename Pred>
+    DispatchResult preemptFor(int to, Pred canTake) {
+        DispatchResult res;
+        res.incident = to;
+        Incident& x = incidents[to];
+        res.neededType = unitFor(x.type);
+        if (x.status != "OPEN") return res;
+        ShortestPaths sp = dijkstra(city_.g, incNode_[to]);
+        int best = -1;
+        for (int r = 0; r < resources.size(); r++) {
+            if (resources[r].type != res.neededType || resources[r].status != "BUSY" || !canTake(r)) continue;
+            if (activeIncidentOf(r) < 0) continue;
+            double d = sp.dist[city_.resourceNode(r)];
+            if (best < 0 || d < sp.dist[city_.resourceNode(best)]) best = r;
+        }
+        if (best < 0) return res;
+
+        MultiLinkedList<Deployment>::Node* old = deployments_.colLast(best);
+        int from = old->row;
+        old->val.diverted = true;
+        if (old->val.hospital >= 0) hospitals[old->val.hospital].freeBeds++;
+        incidents[from].status = "OPEN";
+        pushUrgent(from);
+
+        res.resource = best;
+        res.bumped = from;
+        res.km = sp.dist[city_.resourceNode(best)];
+        cost_.set(to, best, res.km);
+        res.hospital = reserveBed(to, res.hospitalKm);
+        x.status = "DISPATCHED";
+        deployments_.add(to, best, Deployment{res.km, now_, res.hospital, res.hospitalKm, false});
+        log_.info("Pre-empted " + resources[best].name + " from incident #" + std::to_string(incidents[from].id) +
+                  " (sev " + std::to_string(incidents[from].severity) + ") to incident #" + std::to_string(x.id) +
+                  " (sev " + std::to_string(x.severity) + ")");
+        return res;
+    }
+
+    // Incident the unit is currently assigned to, or -1 (free, returning, or busy on an unknown job).
+    int activeIncidentOf(int r) const {
+        MultiLinkedList<Deployment>::Node* last = deployments_.colLast(r);
+        if (!last || last->val.diverted || incidents[last->row].status != "DISPATCHED") return -1;
+        return last->row;
+    }
+
+    void setPolicy(const DispatchPolicy& p) { policy_ = p; }
+    const DispatchPolicy& policy() const { return policy_; }
 
     // Dispatches one specific incident by id (its old queue entry becomes stale and is skipped later).
     DispatchResult dispatchIncident(int id, std::string& err) {
@@ -357,7 +463,7 @@ public:
         if (incidents[i].status != "DISPATCHED") { err = "incident #" + std::to_string(id) + " is " + incidents[i].status; return -1; }
         Action a; a.type = ACT_RESOLVE; a.incident = i;
         deployments_.forEachInRow(i, [&](MultiLinkedList<Deployment>::Node& d) {
-            if (resources[d.col].status == "BUSY") { resources[d.col].status = "AVAILABLE"; a.freed.push_back(d.col); }
+            if (!d.val.diverted && resources[d.col].status == "BUSY") { resources[d.col].status = "AVAILABLE"; a.freed.push_back(d.col); }
         });
         incidents[i].status = "RESOLVED";
         int freed = a.freed.size();

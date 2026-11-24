@@ -110,6 +110,20 @@ static void dashboard(NexaSystem& sys) {
               << " roads   Cost matrix: " << sys.costMatrix().nnz() << " cells stored\n";
 }
 
+static const char* POLICY_NAMES[4] = {"basic", "ageing", "pre-emption", "ageing + pre-emption"};
+
+static void applyPolicy(SimConfig& cfg, int p) {   // p = 0..3
+    cfg.policy.aging = (p == 1 || p == 3);
+    cfg.preempt = (p == 2 || p == 3);
+}
+static void printPolicyHelp() {
+    std::cout << "  Dispatch policy:\n"
+                 "    1 basic                 most severe first, then oldest\n"
+                 "    2 ageing                non-critical priority rises +1 per 30 min waited (max +3), never above critical\n"
+                 "    3 pre-emption           a critical incident (8-10) may take a unit still driving to a minor one (1-4)\n"
+                 "    4 ageing + pre-emption\n";
+}
+
 static void menu() {
     std::cout << "\n=============== NEXA ===============\n"
                  "  1  Dashboard\n"
@@ -127,6 +141,7 @@ static void menu() {
                  " 13  Save state\n"
                  " 14  Run data-structure demos\n"
                  " 15  Run time simulation\n"
+                 " 16  Compare dispatch policies\n"
                  "  0  Exit\n";
 }
 
@@ -153,7 +168,7 @@ int main(int argc, char** argv) {
     for (;;) {
         menu();
         int choice = 0;
-        if (!readInt("Choose: ", choice, 0, 15)) break;
+        if (!readInt("Choose: ", choice, 0, 16)) break;
         std::cout << "\n";
         if (choice == 0) break;
 
@@ -302,14 +317,19 @@ int main(int argc, char** argv) {
             SimConfig cfg;
             int hours = 1, seed = 0; double rate = 0;
             std::cout << "  Units drive to incidents, work on scene, return to base, and new incidents keep arriving.\n";
+            int pol = 1;
+            printPolicyHelp();
             if (!readInt("Hours to simulate (1-168): ", hours, 1, 168) ||
                 !readDouble("New incidents per hour (0-60, 0 = just let time pass): ", rate, 0, 60) ||
-                !readInt("Random seed (any number, same seed = same run): ", seed, 0, 1000000)) break;
+                !readInt("Random seed (any number, same seed = same run): ", seed, 0, 1000000) ||
+                !readInt("Policy (1-4): ", pol, 1, 4)) break;
             cfg.hours = hours; cfg.arrivalsPerHour = rate; cfg.seed = (unsigned)seed;
+            applyPolicy(cfg, pol - 1);
             Simulator sim(sys);
             SimReport r = sim.run(cfg);
-            std::cout << "\n  Simulated t=" << r.start << " to t=" << r.end << " (" << hours << " h)\n"
-                      << "  Dispatches: " << r.dispatched << "   Resolved: " << r.resolved
+            std::cout << "\n  Simulated t=" << r.start << " to t=" << r.end << " (" << hours << " h, policy: "
+                      << POLICY_NAMES[pol - 1] << ")\n"
+                      << "  Dispatches: " << r.dispatched << "   Pre-emptions: " << r.preemptions << "   Resolved: " << r.resolved
                       << "   Still open: " << r.stillOpen << "   Peak waiting: " << r.peakOpen << "\n";
             if (r.arrivals > 0) {
                 std::cout << "  New incidents: " << r.arrivals << ", reached by a unit: " << r.answered << " ("
@@ -341,6 +361,55 @@ int main(int argc, char** argv) {
                 std::cout << "\n";
             }
             std::cout << "  (Undo history was cleared: past actions can't be undone once time has moved on.)\n";
+
+        } else if (choice == 16) {
+            int hours = 8, seed = 2026, runs = 10; double rate = 4;
+            std::cout << "  Runs the same scenarios under all four policies, each starting fresh from '" << dir << "'.\n"
+                         "  Results are averaged over several seeds, because one random day can mislead.\n"
+                         "  Your current session is not changed.\n";
+            printPolicyHelp();
+            if (!readInt("Hours to simulate (1-168): ", hours, 1, 168) ||
+                !readDouble("New incidents per hour (0-60): ", rate, 0, 60) ||
+                !readInt("First random seed: ", seed, 0, 1000000) ||
+                !readInt("Number of seeds to average (1-50): ", runs, 1, 50)) break;
+            DynamicArray<SimReport> res[4];
+            bool ok = true;
+            for (int p = 0; p < 4 && ok; p++) {
+                for (int k = 0; k < runs; k++) {
+                    NexaSystem fresh("logs/compare.log");
+                    std::string e;
+                    if (!fresh.load(dir, e)) { std::cout << "  Could not load: " << e << "\n"; ok = false; break; }
+                    SimConfig cfg;
+                    cfg.hours = hours; cfg.arrivalsPerHour = rate; cfg.seed = (unsigned)(seed + k);
+                    applyPolicy(cfg, p);
+                    Simulator sim(fresh);
+                    res[p].push_back(sim.run(cfg));
+                }
+            }
+            if (!ok) continue;
+            auto row = [&](const char* label, auto get) {   // average of get(report) over all seeds
+                std::cout << "  " << std::left << std::setw(30) << label << std::right;
+                for (int p = 0; p < 4; p++) {
+                    double sum = 0;
+                    for (const SimReport& r : res[p]) sum += get(r);
+                    std::cout << std::setw(12) << sum / runs;
+                }
+                std::cout << "\n";
+            };
+            std::cout << "\n  " << hours << " h, " << rate << " incidents/h, average of " << runs << " seed(s) from "
+                      << seed << ". Times in minutes; \"all\" counts incidents not yet reached.\n"
+                      << "  " << std::setw(30) << "" << std::setw(12) << "basic" << std::setw(12) << "ageing"
+                      << std::setw(12) << "pre-empt" << std::setw(12) << "both" << "\n";
+            row("new incidents reached (%)", [](const SimReport& r) { return r.arrivals ? 100.0 * r.answered / r.arrivals : 0.0; });
+            row("response avg (all)", [](const SimReport& r) { return r.avgAll; });
+            row("response median (all)", [](const SimReport& r) { return r.medianAll; });
+            row("response 90% (all)", [](const SimReport& r) { return r.p90All; });
+            row("critical 8-10 avg (all)", [](const SimReport& r) { return r.sevAvgAll[2]; });
+            row("critical 8-10 90% (all)", [](const SimReport& r) { return r.sevP90All[2]; });
+            row("serious 4-7 avg (all)", [](const SimReport& r) { return r.sevAvgAll[1]; });
+            row("minor 1-3 avg (all)", [](const SimReport& r) { return r.sevAvgAll[0]; });
+            row("still open at end", [](const SimReport& r) { return (double)r.stillOpen; });
+            row("pre-emptions", [](const SimReport& r) { return (double)r.preemptions; });
         }
     }
     std::cout << "Goodbye.\n";
