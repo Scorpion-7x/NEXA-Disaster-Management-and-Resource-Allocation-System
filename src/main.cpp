@@ -9,6 +9,7 @@
 #include <string>
 #include "nexa/app/nexa_system.h"
 #include "nexa/app/demos.h"
+#include "nexa/app/simulator.h"
 
 using namespace nexa;
 
@@ -41,7 +42,7 @@ static bool readLong(const std::string& prompt, long long& v, long long lo, long
     return false;
 }
 static bool readInt(const std::string& prompt, int& v, int lo, int hi) {
-    long long x;
+    long long x = 0;
     if (!readLong(prompt, x, lo, hi)) return false;
     v = (int)x;
     return true;
@@ -125,6 +126,7 @@ static void menu() {
                  " 12  Deployment history\n"
                  " 13  Save state\n"
                  " 14  Run data-structure demos\n"
+                 " 15  Run time simulation\n"
                  "  0  Exit\n";
 }
 
@@ -150,8 +152,8 @@ int main(int argc, char** argv) {
 
     for (;;) {
         menu();
-        int choice;
-        if (!readInt("Choose: ", choice, 0, 14)) break;
+        int choice = 0;
+        if (!readInt("Choose: ", choice, 0, 15)) break;
         std::cout << "\n";
         if (choice == 0) break;
 
@@ -170,7 +172,7 @@ int main(int argc, char** argv) {
         } else if (choice == 3) {
             const char* types[] = {"FLOOD", "FIRE", "EARTHQUAKE", "ACCIDENT", "MEDICAL", "COLLAPSE"};
             std::cout << "  Types: 1 FLOOD  2 FIRE  3 EARTHQUAKE  4 ACCIDENT  5 MEDICAL  6 COLLAPSE\n";
-            int t, sev; double lat, lon; std::string desc;
+            int t = 1, sev = 1; double lat = 0, lon = 0; std::string desc;
             if (!readInt("Type (1-6): ", t, 1, 6) || !readInt("Severity (1-10): ", sev, 1, 10) ||
                 !readDouble("Latitude (28.0-29.0): ", lat, 28.0, 29.0) ||
                 !readDouble("Longitude (77.0-78.0): ", lon, 77.0, 78.0) ||
@@ -188,14 +190,14 @@ int main(int argc, char** argv) {
                 std::cout << "  " << d.waiting << " more urgent incident(s) are waiting for a unit of their type.\n";
 
         } else if (choice == 5) {
-            int id;
+            int id = 0;
             if (!readInt("Incident id: ", id, 1, 1000000)) break;
             DispatchResult d = sys.dispatchIncident(id, err);
             if (d.incident < 0) std::cout << "  " << err << "\n";
             else printDispatch(sys, d);
 
         } else if (choice == 6) {
-            int id;
+            int id = 0;
             if (!readInt("Incident id: ", id, 1, 1000000)) break;
             int freed = sys.resolveIncident(id, err);
             if (freed < 0) std::cout << "  " << err << "\n";
@@ -219,7 +221,7 @@ int main(int argc, char** argv) {
             }
 
         } else if (choice == 9) {
-            double lat, lon; int k; std::string type, avail;
+            double lat = 0, lon = 0; int k = 1; std::string type, avail;
             if (!readDouble("Latitude (28.0-29.0): ", lat, 28.0, 29.0) ||
                 !readDouble("Longitude (77.0-78.0): ", lon, 77.0, 78.0) ||
                 !readInt("How many (1-10): ", k, 1, 10) ||
@@ -235,14 +237,14 @@ int main(int argc, char** argv) {
             }
 
         } else if (choice == 10) {
-            long long from, to;
+            long long from = 0, to = 0;
             if (!readLong("From time t: ", from, 0, 1000000000) || !readLong("To time t: ", to, from, 1000000000)) break;
             DynamicArray<int> list = sys.incidentsBetween(from, to);
             std::cout << "  " << list.size() << " incident(s) reported in [" << from << ", " << to << "] (AVL range query):\n";
             for (int k = 0; k < list.size() && k < 25; k++) printIncident(sys.incidents[list[k]]);
 
         } else if (choice == 11) {
-            int id;
+            int id = 0;
             if (!readInt("Incident id: ", id, 1, 1000000)) break;
             int i = sys.incidentIndex(id);
             if (i < 0) { std::cout << "  No incident #" << id << "\n"; continue; }
@@ -256,7 +258,7 @@ int main(int argc, char** argv) {
 
         } else if (choice == 12) {
             std::cout << "  1 All deployments   2 For one incident   3 For one resource\n";
-            int v;
+            int v = 1;
             if (!readInt("View: ", v, 1, 3)) break;
             auto show = [&](MultiLinkedList<Deployment>::Node& d) {
                 std::cout << "  t=" << std::setw(6) << d.val.at << "  #" << std::setw(4) << sys.incidents[d.row].id
@@ -270,7 +272,7 @@ int main(int argc, char** argv) {
                 std::cout << "  " << dep.size() << " deployment(s), oldest first:\n";
                 dep.forEachAll(show);
             } else if (v == 2) {
-                int id;
+                int id = 0;
                 if (!readInt("Incident id: ", id, 1, 1000000)) break;
                 int i = sys.incidentIndex(id);
                 if (i < 0) { std::cout << "  No incident #" << id << "\n"; continue; }
@@ -295,6 +297,35 @@ int main(int argc, char** argv) {
 
         } else if (choice == 14) {
             runDemos(dir);
+
+        } else if (choice == 15) {
+            SimConfig cfg;
+            int hours = 1, seed = 0; double rate = 0;
+            std::cout << "  Units drive to incidents, work on scene, return to base, and new incidents keep arriving.\n";
+            if (!readInt("Hours to simulate (1-168): ", hours, 1, 168) ||
+                !readDouble("New incidents per hour (0-60, 0 = just let time pass): ", rate, 0, 60) ||
+                !readInt("Random seed (any number, same seed = same run): ", seed, 0, 1000000)) break;
+            cfg.hours = hours; cfg.arrivalsPerHour = rate; cfg.seed = (unsigned)seed;
+            Simulator sim(sys);
+            SimReport r = sim.run(cfg);
+            std::cout << "\n  Simulated t=" << r.start << " to t=" << r.end << " (" << hours << " h)\n"
+                      << "  New incidents: " << r.arrivals << "   Dispatches: " << r.dispatched
+                      << "   Resolved: " << r.resolved << "   Still open: " << r.stillOpen
+                      << "   Peak waiting: " << r.peakOpen << "\n";
+            if (r.answered > 0)
+                std::cout << "  Response time for new incidents (report -> unit on scene), minutes:\n"
+                          << "    average " << r.avgResponse << "   median " << r.medianResponse
+                          << "   90% within " << r.p90Response << "   worst " << r.maxResponse << "\n"
+                          << "  Average wait for a free unit: " << r.avgWait << " min\n";
+            std::cout << "  Unit utilisation: " << r.utilization * 100 << "%\n  By unit type:\n";
+            for (int t = 0; t < Simulator::TYPE_COUNT; t++) {
+                std::cout << "    " << std::left << std::setw(12) << Simulator::typeName(t) << std::right
+                          << std::setw(4) << r.typeAnswered[t] << " answered";
+                if (r.typeAnswered[t]) std::cout << ", avg " << r.typeAvgResponse[t] << " min";
+                if (r.typeOpen[t]) std::cout << ", " << r.typeOpen[t] << " still waiting";
+                std::cout << "\n";
+            }
+            std::cout << "  (Undo history was cleared: past actions can't be undone once time has moved on.)\n";
         }
     }
     std::cout << "Goodbye.\n";

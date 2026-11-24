@@ -25,6 +25,7 @@ struct Deployment {
     double km = 0;          // road distance unit -> incident
     long long at = 0;       // dispatch time (epoch minutes)
     int hospital = -1;      // hospital index, -1 if no bed was needed
+    double hospitalKm = 0;  // road distance incident -> hospital
 };
 
 struct DispatchResult {
@@ -168,7 +169,7 @@ private:
         x.status = "DISPATCHED";
         Action a;
         a.type = ACT_DISPATCH; a.incident = i; a.resource = r; a.hospital = res.hospital;
-        a.dep = deployments_.add(i, r, Deployment{res.km, now_, res.hospital});
+        a.dep = deployments_.add(i, r, Deployment{res.km, now_, res.hospital, res.hospitalKm});
         undo_.push(a);
         log_.info("Dispatched " + resources[r].name + " to incident #" + std::to_string(x.id) +
                   (res.hospital >= 0 ? ", bed reserved at " + hospitals[res.hospital].name : ""));
@@ -233,8 +234,17 @@ public:
                     int* r = resById_.get(std::stoi(row[1]));
                     if (!i || !r) continue;
                     int h = std::stoi(row[4]);
-                    deployments_.add(*i, *r, Deployment{std::stod(row[2]), std::stoll(row[3]), h});
+                    double hkm = row.size() >= 6 ? std::stod(row[5]) : 0;   // column added later
+                    deployments_.add(*i, *r, Deployment{std::stod(row[2]), std::stoll(row[3]), h, hkm});
                 } catch (...) {}
+            }
+        }
+        // meta.csv (written by save) holds the clock, which may be later than the last report
+        CsvTable meta;
+        if (readCsv(dir + "/meta.csv", meta)) {
+            for (int k = 0; k < meta.size(); k++) {
+                if (meta[k].size() < 2 || meta[k][0] != "now") continue;
+                try { long long t = std::stoll(meta[k][1]); if (t > now_) now_ = t; } catch (...) {}
             }
         }
         log_.info("System loaded from '" + dir + "': " + std::to_string(incidents.size()) + " incidents, " +
@@ -255,23 +265,33 @@ public:
             row.push_back(std::to_string(d.val.km));
             row.push_back(std::to_string(d.val.at));
             row.push_back(std::to_string(d.val.hospital));
+            row.push_back(std::to_string(d.val.hospitalKm));
             rows.push_back(row);
         });
         bool ok = saveIncidents(dir + "/incidents.csv", incidents) &&
                   saveResources(dir + "/resources.csv", resources) &&
                   saveHospitals(dir + "/hospitals.csv", hospitals) &&
-                  writeCsv(dir + "/deployments.csv", "incident_id,resource_id,km,at,hospital", rows);
+                  writeCsv(dir + "/deployments.csv", "incident_id,resource_id,km,at,hospital,hospital_km", rows);
+        CsvTable meta;
+        CsvRow clock;
+        clock.push_back("now"); clock.push_back(std::to_string(now_));
+        meta.push_back(clock);
+        ok = ok && writeCsv(dir + "/meta.csv", "key,value", meta);
         if (ok) log_.info("State saved to '" + dir + "'");
         else log_.error("Saving to '" + dir + "' failed");
         return ok;
     }
 
-    // Adds a new OPEN incident at the current time and puts it in the intake queue. Returns its index.
-    int reportIncident(const std::string& type, int severity, double lat, double lon, const std::string& desc) {
+    // Adds a new OPEN incident and puts it in the intake queue. Returns its index.
+    // at = report time; by default one minute after the current time.
+    int reportIncident(const std::string& type, int severity, double lat, double lon, const std::string& desc,
+                       long long at = -1) {
         Incident x;
         x.id = nextIncidentId_++;
         x.type = type; x.severity = severity; x.lat = lat; x.lon = lon;
-        x.reportedAt = ++now_;
+        if (at < 0) at = now_ + 1;
+        if (at > now_) now_ = at;
+        x.reportedAt = at;
         x.status = "OPEN"; x.description = desc;
         int i = incidents.size();
         incidents.push_back(x);
@@ -435,6 +455,26 @@ public:
     long long now() const { return now_; }
     int timelineHeight() const { return timeline_.height(); }
     size_t nameTableProbes() const { return resByName_.probeCount(); }
+
+    // ---------- hooks for the simulator (include/nexa/app/simulator.h) ----------
+
+    // Moves the clock forward (never backward).
+    void advanceClock(long long t) { if (t > now_) now_ = t; }
+    // The unit's crew has finished on scene: the incident is closed but the unit is still driving back.
+    void markResolved(int i) {
+        if (incidents[i].status != "DISPATCHED") return;
+        incidents[i].status = "RESOLVED";
+        log_.info("Incident #" + std::to_string(incidents[i].id) + " cleared at t=" + std::to_string(now_));
+    }
+    // The unit is back at base and can be dispatched again.
+    void releaseUnit(int r) {
+        if (resources[r].status == "AVAILABLE") return;
+        resources[r].status = "AVAILABLE";
+        log_.info(resources[r].name + " available again at t=" + std::to_string(now_));
+    }
+    // Once time has passed, old actions can no longer be undone safely.
+    void clearUndo() { undo_.clear(); }
+    void logInfo(const std::string& msg) { log_.info(msg); }
 };
 
 }  // namespace nexa
