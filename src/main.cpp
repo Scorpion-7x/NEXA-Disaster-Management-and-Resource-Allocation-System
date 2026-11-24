@@ -4,6 +4,9 @@
 #include "nexa/ds/priority_queue.h"
 #include "nexa/ds/probing_hash_table.h"
 #include "nexa/ds/avl_tree.h"
+#include "nexa/ds/kd_tree.h"
+#include "nexa/ds/sparse_matrix.h"
+#include "nexa/ds/multi_linked_list.h"
 #include "nexa/map/city_map.h"
 #include "nexa/algo/sort.h"
 #include "nexa/algo/search.h"
@@ -114,5 +117,72 @@ int main(int argc, char** argv) {
         std::cout << "\n";
     }
     log.info("Graph demo ran");
+
+    // Allocation demo: KD tree -> candidate cost matrix (sparse) -> assign -> deployment records (multi-linked list)
+    //   1. KD tree gives the 3 straight-line-nearest available units of the right type (cheap filter)
+    //   2. Dijkstra turns those into real road distances, stored in a sparse incident x resource matrix
+    //   3. the cheapest still-available candidate is assigned; the deployment goes into a multi-linked
+    //      list so it can be walked per incident, per resource, or as the full history
+    const double LON_SCALE = 0.878;   // cos(28.57 deg): makes a degree of lon the same length as a degree of lat near Noida
+    DynamicArray<KDPoint> pts;
+    for (int r = 0; r < resources.size(); r++) pts.push_back(KDPoint{resources[r].lat, resources[r].lon * LON_SCALE, r});
+    KDTree kd;
+    kd.build(pts);
+
+    struct Deployment { double km; long long at; };
+    SparseMatrix<double> cost(incidents.size(), resources.size());
+    MultiLinkedList<Deployment> deployments;
+    const int CANDIDATES = 3, TO_DISPATCH = 10;
+
+    std::cout << "\nAllocation (top " << TO_DISPATCH << " incidents, " << CANDIDATES << " KD candidates each)\n";
+    int assigned = 0;
+    for (int k = 0; k < TO_DISPATCH && k < ranked.size(); k++) {
+        int i = linearSearch(incidents, [&](const Incident& x) { return x.id == ranked[k].id; });
+        Incident& x = incidents[i];
+        std::string want = unitFor(x.type);
+        int cand[CANDIDATES];
+        int m = kd.kNearest(x.lat, x.lon * LON_SCALE, CANDIDATES, cand, [&](int r) {
+            return resources[r].type == want && resources[r].status == "AVAILABLE";
+        });
+        ShortestPaths sp = dijkstra(city.g, city.incidentNode(i));
+        for (int j = 0; j < m; j++) cost.set(i, cand[j], sp.dist[city.resourceNode(cand[j])]);
+
+        int r = cost.argMinInRow(i, [&](int c) { return resources[c].status == "AVAILABLE"; });
+        std::cout << "  #" << x.id << " " << x.type << " (sev " << x.severity << "): ";
+        if (r < 0) { std::cout << "no available " << want << "\n"; log.warn("No " + want + " for incident #" + std::to_string(x.id)); continue; }
+        resources[r].status = "BUSY";
+        x.status = "DISPATCHED";
+        deployments.add(i, r, Deployment{cost.get(i, r), x.reportedAt});
+        assigned++;
+        std::cout << resources[r].name << " (" << cost.get(i, r) << " km by road, best of " << m << " KD candidate(s))\n";
+        log.info("Dispatched " + resources[r].name + " to incident #" + std::to_string(x.id));
+    }
+    std::cout << "Cost matrix: " << cost.nnz() << " of " << cost.rows() * cost.cols() << " cells stored ("
+              << cost.density() * 100 << "% dense)\n";
+    std::cout << "Deployments recorded: " << deployments.size() << ", assigned " << assigned << "\n";
+
+    // the same records, walked three ways
+    if (const auto* first = deployments.first()) {
+        int i = first->row, r = first->col;
+        std::cout << "Incident #" << incidents[i].id << " has " << deployments.rowSize(i) << " unit(s) assigned; "
+                  << resources[r].name << " has " << deployments.colSize(r) << " deployment(s)\n";
+    }
+    std::cout << "History (dispatch order):";
+    deployments.forEachAll([&](MultiLinkedList<Deployment>::Node& d) {
+        std::cout << " #" << incidents[d.row].id << "<-" << resources[d.col].name;
+    });
+    std::cout << "\n";
+
+    // cancelling a dispatch: unlink the record from all three lists at once and free the unit
+    if (auto* last = deployments.last()) {
+        int r = last->col, i = last->row;
+        deployments.remove(last);
+        resources[r].status = "AVAILABLE";
+        incidents[i].status = "OPEN";
+        std::cout << "Cancelled #" << incidents[i].id << "<-" << resources[r].name << ": "
+                  << deployments.size() << " deployments left, " << resources[r].name << " is AVAILABLE again\n";
+        log.info("Cancelled dispatch of " + resources[r].name + " to incident #" + std::to_string(incidents[i].id));
+    }
+    log.info("Allocation demo ran");
     return 0;
 }
