@@ -54,6 +54,22 @@ public:
           nrows_(o.nrows_), ncols_(o.ncols_), nnz_(o.nnz_), fallback_(o.fallback_) {
         o.nrows_ = o.ncols_ = o.nnz_ = 0;
     }
+    SparseMatrix& operator=(SparseMatrix&& o) noexcept {
+        if (this != &o) {
+            freeAll();
+            rows_ = std::move(o.rows_); rowNnz_ = std::move(o.rowNnz_);
+            nrows_ = o.nrows_; ncols_ = o.ncols_; nnz_ = o.nnz_; fallback_ = o.fallback_;
+            o.nrows_ = o.ncols_ = o.nnz_ = 0;
+        }
+        return *this;
+    }
+
+    // Appends an empty row (e.g. a newly reported incident) and returns its index. O(1) amortized.
+    int addRow() {
+        rows_.push_back(nullptr);
+        rowNnz_.push_back(0);
+        return nrows_++;
+    }
 
     // Insert or overwrite cell (r, c).
     void set(int r, int c, const T& v) {
